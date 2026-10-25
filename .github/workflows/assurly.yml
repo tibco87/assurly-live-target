@@ -1,0 +1,62 @@
+name: Assurly Security & Config Scan
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  scan:
+    name: Assurly Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run Assurly Scan
+        run: npx --yes assurly@1 scan
+
+      # Live Lock checks the URL that is live now. On a pull request that is
+      # still the old code, so a PR fixing a blocker would fail on the blocker.
+      - name: Assurly Live Lock
+        if: github.event_name != 'pull_request'
+        env:
+          ASSURLY_API_KEY: ${{ secrets.ASSURLY_API_KEY }}
+          ASSURLY_TARGET_URL: ${{ secrets.ASSURLY_TARGET_URL }}
+          ASSURLY_API_URL: ${{ secrets.ASSURLY_API_URL }}
+        run: |
+          node --input-type=module <<'NODE'
+          const key = process.env.ASSURLY_API_KEY || '';
+          const target = process.env.ASSURLY_TARGET_URL || '';
+          if (!key || !target) {
+            console.log('Live Lock skipped: set ASSURLY_API_KEY and ASSURLY_TARGET_URL to require it.');
+            process.exit(0);
+          }
+          const api = (process.env.ASSURLY_API_URL || 'https://assurly.dev').replace(/\/$/, '');
+          const response = await fetch(api + '/api/v1/live-lock', {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer ' + key,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              url: target,
+              gitSha: process.env.GITHUB_SHA,
+              attemptId: String(process.env.GITHUB_RUN_ID) + '.' + String(process.env.GITHUB_RUN_ATTEMPT),
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          console.log(JSON.stringify(payload));
+          if (!response.ok || payload.status !== 'ready') {
+            console.error('Live Lock blocked this deploy.');
+            process.exit(1);
+          }
+          NODE
